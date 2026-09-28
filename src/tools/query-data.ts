@@ -82,8 +82,9 @@ function formatStateGroup(group: QueryDataResult["states"][number]): string {
 }
 
 /** 渲染成给模型看的中文文本。刻意不走 JSON.stringify：列名重复几百次既费 token 又难读。 */
-export function formatQueryDataResult(result: QueryDataResult): string {
+export function formatQueryDataResult(datasetId: string, result: QueryDataResult): string {
 	const lines: string[] = [
+		`数据集 ID：${datasetId}（可传给 analyze_data 继续分析）`,
 		`设备：${result.deviceName}（${result.deviceKey}）`,
 		`时间范围：${result.startTime} ~ ${result.endTime}（两端均含）`,
 		`命中记录：${result.rowCount} 点，实际覆盖 ${result.firstTimestamp ?? "—"} ~ ${result.lastTimestamp ?? "—"}`,
@@ -172,7 +173,7 @@ export function createQueryDataTool(service: DataService) {
 				});
 
 				return {
-					content: [{ type: "text" as const, text: formatQueryDataResult(result) }],
+					content: [{ type: "text" as const, text: formatQueryDataResult(datasetId, result) }],
 					details: toDetails(datasetId, result),
 				};
 			} catch (error) {

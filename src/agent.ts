@@ -20,9 +20,11 @@ import {
 	splitModelSpec,
 } from "./config.ts";
 import { DIAGNOSIS_SYSTEM_PROMPT } from "./prompt.ts";
+import { DatasetStore } from "./domain/dataset/store.ts";
 import { getPool } from "./repositories/pool.ts";
 import { TelemetryRepository } from "./repositories/telemetry-repository.ts";
-import { DataService } from "./services/data-service.ts";
+import { DataService, type QueryDataResult } from "./services/data-service.ts";
+import { AnalysisService } from "./services/analysis-service.ts";
 import { createCustomTools } from "./tools/index.ts";
 
 /**
@@ -72,8 +74,10 @@ export async function createDiagnosisAgent(
 
 	// 传的是 getPool 函数本身而非调用结果：连接池要等第一次查询才创建，
 	// 数据库没配好时 agent 仍能启动。
-	const dataService = new DataService(new TelemetryRepository(getPool));
-	const customTools = createCustomTools(dataService);
+	const datasets = new DatasetStore<QueryDataResult>();
+	const dataService = new DataService(new TelemetryRepository(getPool), datasets);
+	const analysisService = new AnalysisService(datasets);
+	const customTools = createCustomTools(dataService, analysisService);
 
 	const { session } = await createAgentSession({
 		cwd,

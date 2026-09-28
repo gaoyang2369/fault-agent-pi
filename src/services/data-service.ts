@@ -168,10 +168,11 @@ function resolveDevice(input: string): DeviceDefinition {
 }
 
 export class DataService {
-	/** dataset_id 句柄表：原始采样点留在进程内，不进 LLM 上下文。 */
-	private readonly datasets = new DatasetStore<QueryDataResult>();
-
-	constructor(private readonly repository: TelemetryRepository) {}
+	/** 查询结果写入共享句柄表，原始采样点不进入 LLM 上下文。 */
+	constructor(
+		private readonly repository: TelemetryRepository,
+		private readonly datasets: DatasetStore<QueryDataResult>,
+	) {}
 
 	async query(request: QueryDataRequest): Promise<{ datasetId: string; result: QueryDataResult }> {
 		const device = resolveDevice(request.device);
