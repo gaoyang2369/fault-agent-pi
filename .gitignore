@@ -2,3 +2,5 @@ node_modules/
 .scratch/
 *.log
 .env
+knowledge/.index/
+scripts/knowledge/.data/

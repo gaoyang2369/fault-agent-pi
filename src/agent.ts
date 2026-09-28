@@ -17,6 +17,7 @@ import {
 	READ_ONLY_TOOLS,
 	resolveModelSpec,
 	resolveThinkingLevel,
+	resolveKnowledgeConfig,
 	splitModelSpec,
 } from "./config.ts";
 import { DIAGNOSIS_SYSTEM_PROMPT } from "./prompt.ts";
@@ -26,6 +27,10 @@ import { TelemetryRepository } from "./repositories/telemetry-repository.ts";
 import { DataService, type QueryDataResult } from "./services/data-service.ts";
 import { AnalysisService } from "./services/analysis-service.ts";
 import { createCustomTools } from "./tools/index.ts";
+import { KnowledgeRepository } from "./repositories/knowledge-repository.ts";
+import { KnowledgeVectorRepository } from "./repositories/knowledge-vector-repository.ts";
+import { EmbeddingClient } from "./services/embedding-client.ts";
+import { KnowledgeService } from "./services/knowledge-service.ts";
 
 /**
  * 按 PI_MODEL 指定的模型解析；解析不到则回退到第一个已配置密钥的可用模型。
@@ -77,7 +82,13 @@ export async function createDiagnosisAgent(
 	const datasets = new DatasetStore<QueryDataResult>();
 	const dataService = new DataService(new TelemetryRepository(getPool), datasets);
 	const analysisService = new AnalysisService(datasets);
-	const customTools = createCustomTools(dataService, analysisService);
+	const knowledgeConfig = resolveKnowledgeConfig(cwd);
+	const knowledgeService = new KnowledgeService(
+		new KnowledgeRepository(knowledgeConfig.snapshotPath),
+		knowledgeConfig.embedding ? new EmbeddingClient(knowledgeConfig.embedding) : undefined,
+		new KnowledgeVectorRepository(knowledgeConfig.qdrant),
+	);
+	const customTools = createCustomTools(dataService, analysisService, knowledgeService);
 
 	const { session } = await createAgentSession({
 		cwd,

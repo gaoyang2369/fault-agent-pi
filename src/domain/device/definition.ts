@@ -15,4 +15,6 @@ export interface DeviceDefinition {
 	readonly displayName: string;
 	/** 别名，用于把用户口语映射到 key。不进入 SQL。 */
 	readonly aliases: readonly string[];
+	/** 用于知识检索适用性过滤；组件和固件没有登记时不能猜测。 */
+	readonly productFamily: string;
 }

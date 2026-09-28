@@ -1,0 +1,16 @@
+# 仅供本地知识检索使用。数据与采集数据库隔离。
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - ./.data/qdrant:/qdrant/storage
+  embedding:
+    image: ${KNOWLEDGE_OLLAMA_IMAGE:-ollama/ollama:0.12.3}
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ./.data/ollama:/root/.ollama

@@ -20,18 +20,21 @@ import type { DeviceDefinition } from "./definition.ts";
 export const DEVICE_DEFINITIONS: readonly DeviceDefinition[] = [
 	{
 		key: "g120_01",
+		productFamily: "G120",
 		table: "real_data_01",
 		displayName: "G120电机1",
 		aliases: ["电机1", "1号电机", "一号电机", "G120电机1", "G120-1"],
 	},
 	{
 		key: "g120_02",
+		productFamily: "G120",
 		table: "real_data_02",
 		displayName: "G120电机2",
 		aliases: ["电机2", "2号电机", "二号电机", "G120电机2", "G120-2"],
 	},
 	{
 		key: "g120_03",
+		productFamily: "G120",
 		table: "real_data_03",
 		displayName: "G120电机3",
 		aliases: ["电机3", "3号电机", "三号电机", "G120电机3", "G120-3"],

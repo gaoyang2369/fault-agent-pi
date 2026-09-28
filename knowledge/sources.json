@@ -1,0 +1,15 @@
+[
+  {
+    "id": "sinamics-fault-manual",
+    "file": "knowledge/S120_故障手册.pdf",
+    "title": "SINAMICS S120/S150 故障和报警列表",
+    "version": "06/2020",
+    "documentNumber": "6SL3097-5AP00-0RP2",
+    "manufacturer": "Siemens",
+    "language": "zh-CN",
+    "sourceType": "fault_manual",
+    "declaredProducts": ["S120", "S150"],
+    "applicableProducts": ["S120", "S150", "G120"],
+    "applicabilityNote": "项目维护者确认本文件用于当前项目登记的 G120 设备；保留原手册 S120/S150 标注。"
+  }
+]

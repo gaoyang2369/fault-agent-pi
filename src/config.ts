@@ -5,6 +5,9 @@
  * `.env`（已在 .gitignore 中），仓库里只出现变量名。
  */
 
+import { resolve } from "node:path";
+import type { EmbeddingConfig } from "./services/embedding-client.ts";
+
 // Node 22 内置能力，不需要 dotenv。文件不存在时静默跳过——变量也可能由外部环境注入。
 // 放在模块顶层是为了让任何入口（main.ts、临时冒烟脚本）都自动生效。
 try {
@@ -103,5 +106,23 @@ export function resolveMysqlConfig(): MysqlConfig {
 		user,
 		password,
 		database: process.env[MYSQL_ENV_KEYS.database]?.trim() || "dcma",
+	};
+}
+
+/** 知识库配置独立于采集数据库；不读取 pi 的聊天模型密钥作为 embedding 密钥。 */
+export function resolveKnowledgeConfig(cwd = process.cwd()) {
+	const baseUrl = process.env.KNOWLEDGE_EMBEDDING_BASE_URL?.trim();
+	const embedding: EmbeddingConfig | undefined = baseUrl ? {
+		baseUrl,
+		model: process.env.KNOWLEDGE_EMBEDDING_MODEL?.trim() || "bge-m3",
+		apiKey: process.env.KNOWLEDGE_EMBEDDING_API_KEY?.trim() || undefined,
+	} : undefined;
+	return {
+		snapshotPath: resolve(cwd, process.env.KNOWLEDGE_SNAPSHOT_PATH?.trim() || "knowledge/.index/snapshot.json"),
+		embedding,
+		qdrant: {
+			url: process.env.KNOWLEDGE_QDRANT_URL?.trim() || "http://127.0.0.1:6333",
+			apiKey: process.env.KNOWLEDGE_QDRANT_API_KEY?.trim() || undefined,
+		},
 	};
 }
