@@ -43,3 +43,13 @@ export interface StateDefinition extends MetricBase {
 export type MetricDefinition = MeasurementDefinition | StateDefinition;
 
 export type MetricKind = MetricDefinition["kind"];
+
+/**
+ * 类型谓词：filter 之后能拿到 MeasurementDefinition，而不是宽化后的联合。
+ *
+ * 服务层要靠它决定一个指标走统计聚合还是走取值分组——这个分派如果搞错，
+ * 就会拿字符串列去求平均（见 definitions.ts 里 system_run_time 的注释）。
+ */
+export function isMeasurement(definition: MetricDefinition): definition is MeasurementDefinition {
+	return definition.kind === "measurement";
+}

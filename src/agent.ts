@@ -1,8 +1,8 @@
 /**
  * Agent 组装：把模型、系统提示词、工具与会话拼成一个可用的故障诊断 agent。
  *
- * 这是后续扩展的主要入口——新增工具时在 config.ts 的工具列表与 createAgentSession
- * 的 customTools 中登记即可。
+ * 这里也是依赖装配的地方：连接池 → 仓储 → 服务 → 工具，依赖方向单向向下，
+ * 工具层拿不到池和 SQL。新增工具只需在 tools/index.ts 里登记。
  */
 
 import {
@@ -20,6 +20,10 @@ import {
 	splitModelSpec,
 } from "./config.ts";
 import { DIAGNOSIS_SYSTEM_PROMPT } from "./prompt.ts";
+import { getPool } from "./repositories/pool.ts";
+import { TelemetryRepository } from "./repositories/telemetry-repository.ts";
+import { DataService } from "./services/data-service.ts";
+import { createCustomTools } from "./tools/index.ts";
 
 /**
  * 按 PI_MODEL 指定的模型解析；解析不到则回退到第一个已配置密钥的可用模型。
@@ -66,13 +70,20 @@ export async function createDiagnosisAgent(
 	});
 	await resourceLoader.reload();
 
+	// 传的是 getPool 函数本身而非调用结果：连接池要等第一次查询才创建，
+	// 数据库没配好时 agent 仍能启动。
+	const dataService = new DataService(new TelemetryRepository(getPool));
+	const customTools = createCustomTools(dataService);
+
 	const { session } = await createAgentSession({
 		cwd,
 		model,
 		modelRuntime,
 		thinkingLevel: resolveThinkingLevel(),
 		resourceLoader,
-		tools: [...READ_ONLY_TOOLS],
+		// 两个清单都要：customTools 注册，tools 是允许列表，漏登记会被静默过滤。
+		tools: [...READ_ONLY_TOOLS, ...customTools.map((tool) => tool.name)],
+		customTools,
 		sessionManager: SessionManager.inMemory(cwd),
 	});
 

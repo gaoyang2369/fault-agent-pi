@@ -9,6 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createDiagnosisAgent } from "./agent.ts";
+import { closePool } from "./repositories/pool.ts";
 
 /** 把会话事件渲染成终端输出：正文流式打印，工具调用与重试各打印一行。 */
 function renderEvent(event: AgentSessionEvent): void {
@@ -78,6 +79,8 @@ async function main(): Promise<void> {
 	} finally {
 		unsubscribe();
 		session.dispose();
+		// 没查过数据时连接池从未创建，这里是空操作。
+		await closePool();
 	}
 }
 

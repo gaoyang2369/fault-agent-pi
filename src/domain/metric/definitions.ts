@@ -164,12 +164,15 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
 		description: "变频器实际开关频率。",
 	},
 	{
-		kind: "measurement",
+		// 实测该列是 varchar，取值形如 "0000:00:00"。若登记为 measurement，
+		// AVG() 会把它强转成 0 并只留下 1292 警告，得到一个看起来合理的假数字，
+		// 所以这里必须是 state。
+		kind: "state",
 		key: "system_run_time",
 		column: "system_run_time",
 		displayName: "系统累计运行时间",
 		description:
-			"系统累计运行时间。存储类型与单位均未确认（可能是毫秒数、天数或格式化字符串），使用前需先确认。",
+			"系统累计运行时间。实测为格式化字符串（形如 \"0000:00:00\"），不是数值，因此不做统计。含义与单位未确认。",
 	},
 
 	// ---- 状态与故障 ----
