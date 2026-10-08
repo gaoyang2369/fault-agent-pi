@@ -31,6 +31,7 @@ import { KnowledgeRepository } from "./repositories/knowledge-repository.ts";
 import { KnowledgeVectorRepository } from "./repositories/knowledge-vector-repository.ts";
 import { EmbeddingClient } from "./services/embedding-client.ts";
 import { KnowledgeService } from "./services/knowledge-service.ts";
+import { configureHttpProxy } from "./services/http-proxy.ts";
 
 /**
  * 按 PI_MODEL 指定的模型解析；解析不到则回退到第一个已配置密钥的可用模型。
@@ -63,6 +64,7 @@ export interface CreateDiagnosisAgentOptions {
 export async function createDiagnosisAgent(
 	options: CreateDiagnosisAgentOptions = {},
 ): Promise<AgentSession> {
+	configureHttpProxy();
 	const cwd = options.cwd ?? process.cwd();
 	const modelRuntime = await ModelRuntime.create();
 	const model = await pickModel(modelRuntime);
