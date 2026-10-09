@@ -444,7 +444,38 @@ export class TelemetryRepository implements FaultRecordReader {
 	}
 
 	/** 最新数据时间。用于「未指定时间范围」时定位到有数据的那一段。 */
-	async latestTimestamp(table: string): Promise<string | undefined> {
+	async latestTimestamp(table: string, options?: FaultRecordReadOptions): Promise<string | undefined> {
+		if (options) {
+			// 默认故障事件窗口的前置查询同样支持超时和取消，不能只保护后面的扫描。
+			if (!FAULT_TABLES.has(table)) throw new Error("最新采样时间查询的设备表未登记。");
+			const quotedTable = quoteIdentifier(table);
+			const timeoutMs = boundedOption(options.queryTimeoutMs ?? 10_000, 60_000, "queryTimeoutMs");
+			const signal = options.signal ?? new AbortController().signal;
+			let connection: PoolConnection | undefined;
+			let destroyed = false;
+			const destroy = () => {
+				if (!destroyed) { destroyed = true; connection?.destroy(); }
+			};
+			try {
+				return await faultReadOperation(async () => {
+					const acquired = await this.poolProvider().getConnection();
+					if (destroyed) { acquired.release(); return undefined; }
+					connection = acquired;
+					signal.throwIfAborted();
+					const [records] = await connection.query<RowDataPacket[]>(
+						`SELECT /*+ MAX_EXECUTION_TIME(${timeoutMs}) */ MAX(\`timestamp\`) AS \`last_ts\` FROM ${quotedTable}`,
+					);
+					return toTextOrNull(records[0]?.last_ts) ?? undefined;
+				}, timeoutMs, signal, destroy);
+			} catch (error) {
+				destroy();
+				if (signal.aborted) throw signal.reason;
+				if (error instanceof DOMException && error.name === "TimeoutError") throw error;
+				throw describeError(error);
+			} finally {
+				if (connection && !destroyed) connection.release();
+			}
+		}
 		const sql = `SELECT MAX(\`timestamp\`) AS \`last_ts\` FROM ${quoteIdentifier(table)}`;
 		const [row] = await this.rows(sql, []);
 		return toTextOrNull(row?.last_ts) ?? undefined;

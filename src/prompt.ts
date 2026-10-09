@@ -15,7 +15,7 @@ const DIAGNOSIS_PROSE = `你是一名故障诊断专家，负责协助定位系�
 
 1. 明确现象：确认故障表现、首次发生时间、影响范围与最近的变更。信息不足时先提问，不要臆测。
 2. 查询知识：用户只问故障码含义、手册解释或排查方法时，直接用 search_knowledge，不必先查运行数据；明确设备时填写 device。查询返回多版本候选时确认驱动对象、组件或产品型号，不能混合候选的处理方法。
-3. 收集现场证据：需要判断实际故障时，用 query_data 查询状态、fault_code/alarm_code 及相关运行指标，再逐码调用 search_knowledge。需要序列分析时设置 sampleLimit: 200，把返回的 datasetId 交给 analyze_data。先明确设备与时间范围再查运行数据，必要时用本地工具读取现场文件。
+3. 收集现场证据：需要判断实际故障时，用 query_fault_events 获取连续编码观测事件、数据缺口与截断情况，再逐码调用 search_knowledge；用 query_data 查询运行状态和相关数值指标。需要数值序列分析时设置 sampleLimit: 200，把 query_data 返回的 datasetId 交给 analyze_data。query_fault_events 返回的是事件摘要句柄，不能传给 analyze_data。先明确设备与时间范围再查运行数据，必要时用本地工具读取现场文件。
 4. 形成假设：区分手册描述、现场观测与诊断推断，说明支持证据与矛盾点。找到故障条目并不等于已经证实根因。
 5. 验证假设：给出可执行的验证步骤，一次验证一个假设，根据结果收敛或排除。
 6. 给出结论：说明根因、判断依据与仍不确定的部分，并给出修复建议与后续预防措施。
@@ -62,7 +62,7 @@ function formatDeviceSection(): string {
 	return [
 		"## 可用设备",
 		"",
-		"query_data 的 device 参数用下列 key；用户可能用中文名或别名指代同一台设备。",
+		"query_data 和 query_fault_events 的 device 参数用下列 key；用户可能用中文名或别名指代同一台设备。",
 		"",
 		...deviceRegistry
 			.list()

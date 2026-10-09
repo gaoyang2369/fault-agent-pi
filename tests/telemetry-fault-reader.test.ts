@@ -28,12 +28,17 @@ class FakeConnection {
 	snapshot: RawFaultRecord[] = [];
 	onPage?: () => Promise<void> | void;
 	onRollback?: () => Promise<void> | void;
+	onLatest?: () => Promise<void> | void;
 
 	constructor(readonly live: RawFaultRecord[] = []) {}
 
 	async query(sql: string, params: unknown[] = []): Promise<[unknown[], unknown[]]> {
 		this.calls.push({ sql, params });
 		if (sql.includes("information_schema.TABLES")) return [[{ engine: this.engine }], []];
+		if (sql.includes("MAX(`timestamp`) AS `last_ts`")) {
+			await this.onLatest?.();
+			return [[{ last_ts: this.live.map((row) => row.timestamp).sort().at(-1) ?? null }], []];
+		}
 		if (sql.startsWith("START TRANSACTION")) this.snapshot = this.live.map((item) => ({ ...item }));
 		if (sql === "ROLLBACK") await this.onRollback?.();
 		if (!sql.includes("AS `record_id`")) return [[], []];
@@ -253,4 +258,37 @@ test("回滚失败或超时销毁连接且报告失败，不能将带事务的�
 		assert.equal(state.connection.destroyCount, 1);
 		assert.equal(state.connection.releaseCount, 0);
 	}
+});
+
+test("最新时间前置查询有截止时间和取消支持；健康连接归还，异常连接销毁", async () => {
+	const success = harness(new FakeConnection([record("1"), record("2", request.endTime)]));
+	assert.equal(await success.repository.latestTimestamp(request.table, {}), request.endTime);
+	assert.equal(success.connection.releaseCount, 1);
+	const empty = harness();
+	assert.equal(await empty.repository.latestTimestamp(request.table, {}), undefined);
+	assert.equal(empty.connection.releaseCount, 1);
+	for (const abort of [false, true]) {
+		const state = harness();
+		const entered = deferred<void>();
+		state.connection.onLatest = () => { entered.resolve(); return new Promise(() => {}); };
+		const controller = new AbortController();
+		const pending = state.repository.latestTimestamp(request.table, { queryTimeoutMs: 20, signal: controller.signal });
+		await entered.promise;
+		if (abort) controller.abort();
+		await assert.rejects(pending, { name: abort ? "AbortError" : "TimeoutError" });
+		assert.equal(state.connection.destroyCount, 1);
+		assert.equal(state.connection.releaseCount, 0);
+	}
+});
+
+test("最新时间查询在连接等待超时后归还迟到连接，白名单拒绝发生在连接之前", async () => {
+	const waiting = deferred<FakeConnection>();
+	const state = harness(new FakeConnection(), () => waiting.promise);
+	await assert.rejects(state.repository.latestTimestamp(request.table, { queryTimeoutMs: 20 }), { name: "TimeoutError" });
+	waiting.resolve(state.connection);
+	await nextTurn();
+	assert.equal(state.connection.releaseCount, 1);
+	const invalid = harness();
+	await assert.rejects(invalid.repository.latestTimestamp("real_data_04", {}), /未登记/);
+	assert.equal(invalid.acquisitions, 0);
 });

@@ -1,7 +1,7 @@
 import { DatasetStore } from "../domain/dataset/store.ts";
 import { deviceRegistry } from "../domain/device/registry.ts";
 import type {
-	FaultEvent, FaultEventResult, FaultMetricKey, FaultObservation, MessageKind,
+	DiagnosisPeriod, FaultEvent, FaultEventResult, FaultMetricKey, FaultObservation, MessageKind,
 } from "../domain/diagnosis/definition.ts";
 import type {
 	FaultRecordReader, FaultRecordReadOptions, RawFaultRecord,
@@ -10,8 +10,9 @@ import type {
 export interface FaultEventQuery {
 	/** 已登记设备的 key、中文名或别名；物理表名不由调用方指定。 */
 	readonly device: string;
-	readonly startTime: string;
-	readonly endTime: string;
+	/** 两端同时给出或同时省略；省略时取设备有数据的最新一小时。 */
+	readonly startTime?: string;
+	readonly endTime?: string;
 	/** 保留最早开始的事件，默认 20，上限 100；不限制扫描或总数统计。 */
 	readonly maxEvents?: number;
 	/** 保留最早的未知观测示例，默认 10，上限 50；0 表示只在 limitations 报告数量。 */
@@ -28,6 +29,11 @@ export interface FaultEventPolicy {
 
 /** 只保存有界的观测摘要，不保存原始全量记录。句柄由 DatasetStore 分配。 */
 export type FaultEventDataset = Omit<FaultEventResult, "datasetId">;
+
+/** 明确窗口的调用只需迭代接口；使用默认窗口时还需读取设备最新采样时间。 */
+export interface FaultEventSource extends FaultRecordReader {
+	latestTimestamp?(table: string, options?: FaultRecordReadOptions): Promise<string | undefined>;
+}
 
 type ParsedMessageCode =
 	| { readonly status: "code"; readonly code: string; readonly kind: MessageKind }
@@ -101,7 +107,7 @@ class FaultEventAccumulator {
 
 	constructor(
 		private readonly deviceKey: string,
-		private readonly request: FaultEventQuery,
+		private readonly request: DiagnosisPeriod,
 		private readonly noCodeValues: ReadonlySet<string>,
 		private readonly maxGapMs: number,
 		private readonly maxEvents: number,
@@ -208,7 +214,7 @@ export class FaultEventService {
 	private readonly maxGapMs: number;
 
 	constructor(
-		private readonly reader: FaultRecordReader,
+		private readonly reader: FaultEventSource,
 		private readonly datasets: DatasetStore<FaultEventDataset>,
 		policy: FaultEventPolicy = {},
 	) {
@@ -221,25 +227,45 @@ export class FaultEventService {
 	}
 
 	async query(request: FaultEventQuery, options: FaultRecordReadOptions = {}): Promise<FaultEventResult> {
-		const device = deviceRegistry.resolve(request.device);
-		if (!device) throw new Error(`未知设备：${request.device}。请使用已登记设备的 key、中文名或别名。`);
-		const start = timestampMillis(request.startTime);
-		const end = timestampMillis(request.endTime);
-		if (start >= end) throw new Error("故障事件查询的 startTime 必须早于 endTime。");
-		const maxEvents = boundedCount(request.maxEvents ?? 20, 1, 100, "maxEvents");
-		const maxUnknownValues = boundedCount(request.maxUnknownValues ?? 10, 0, 50, "maxUnknownValues");
-		options.signal?.throwIfAborted();
-		// 复制窗口，避免调用方在异步扫描期间修改对象导致查询与摘要窗口不一致。
-		const query = { ...request };
-		const accumulator = new FaultEventAccumulator(device.key, query, this.noCodeValues, this.maxGapMs, maxEvents, maxUnknownValues);
+		// 复制请求，避免调用方在异步解析默认窗口或扫描期间修改参数。
+		const input = { ...request };
+		const readOptions = { ...options };
+		const device = deviceRegistry.resolve(input.device);
+		if (!device) throw new Error(`未知设备：${input.device}。请使用已登记设备的 key、中文名或别名。`);
+		const maxEvents = boundedCount(input.maxEvents ?? 20, 1, 100, "maxEvents");
+		const maxUnknownValues = boundedCount(input.maxUnknownValues ?? 10, 0, 50, "maxUnknownValues");
+		readOptions.signal?.throwIfAborted();
+		const period = await this.resolveWindow(device.table, input, readOptions);
+		readOptions.signal?.throwIfAborted();
+		const accumulator = new FaultEventAccumulator(device.key, period, this.noCodeValues, this.maxGapMs, maxEvents, maxUnknownValues);
 		for await (const record of this.reader.iterateFaultRecords({
-			table: device.table, startTime: query.startTime, endTime: query.endTime,
-		}, options)) {
-			options.signal?.throwIfAborted();
+			table: device.table, ...period,
+		}, readOptions)) {
+			readOptions.signal?.throwIfAborted();
 			accumulator.accept(record);
 		}
-		options.signal?.throwIfAborted();
+		readOptions.signal?.throwIfAborted();
 		const result = accumulator.finish();
 		return { datasetId: this.datasets.put(result), ...result };
+	}
+
+	private async resolveWindow(table: string, request: FaultEventQuery, options: FaultRecordReadOptions): Promise<DiagnosisPeriod> {
+		if ((request.startTime === undefined) !== (request.endTime === undefined)) {
+			throw new Error("startTime 与 endTime 必须同时给出，或同时省略（默认查询设备有数据的最新一小时）。");
+		}
+		let startTime = request.startTime;
+		let endTime = request.endTime;
+		if (startTime === undefined || endTime === undefined) {
+			if (!this.reader.latestTimestamp) throw new Error("当前读取器不支持默认窗口，请同时提供 startTime 与 endTime。");
+			const latest = await this.reader.latestTimestamp(table, options);
+			options.signal?.throwIfAborted();
+			if (latest === undefined) throw new Error("设备没有采样数据，无法确定默认查询窗口。请检查数据来源。");
+			endTime = latest;
+			startTime = new Date(timestampMillis(latest) - 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		}
+		if (timestampMillis(startTime) >= timestampMillis(endTime)) {
+			throw new Error("故障事件查询的 startTime 必须早于 endTime。");
+		}
+		return { startTime, endTime };
 	}
 }

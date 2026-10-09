@@ -8,6 +8,7 @@
     "start": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
+    "fault-events:query": "tsx scripts/diagnosis/fault-events.ts",
     "knowledge:build": "tsx scripts/knowledge/build.ts",
     "knowledge:search": "tsx scripts/knowledge/search.ts"
   },

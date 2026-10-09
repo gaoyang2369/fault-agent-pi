@@ -26,6 +26,7 @@ import { getPool } from "./repositories/pool.ts";
 import { TelemetryRepository } from "./repositories/telemetry-repository.ts";
 import { DataService, type QueryDataResult } from "./services/data-service.ts";
 import { AnalysisService } from "./services/analysis-service.ts";
+import { FaultEventService, type FaultEventDataset } from "./services/fault-event-service.ts";
 import { createCustomTools } from "./tools/index.ts";
 import { KnowledgeRepository } from "./repositories/knowledge-repository.ts";
 import { KnowledgeVectorRepository } from "./repositories/knowledge-vector-repository.ts";
@@ -82,15 +83,17 @@ export async function createDiagnosisAgent(
 	// 传的是 getPool 函数本身而非调用结果：连接池要等第一次查询才创建，
 	// 数据库没配好时 agent 仍能启动。
 	const datasets = new DatasetStore<QueryDataResult>();
-	const dataService = new DataService(new TelemetryRepository(getPool), datasets);
+	const telemetry = new TelemetryRepository(getPool);
+	const dataService = new DataService(telemetry, datasets);
 	const analysisService = new AnalysisService(datasets);
+	const faultEventService = new FaultEventService(telemetry, new DatasetStore<FaultEventDataset>());
 	const knowledgeConfig = resolveKnowledgeConfig(cwd);
 	const knowledgeService = new KnowledgeService(
 		new KnowledgeRepository(knowledgeConfig.snapshotPath),
 		knowledgeConfig.embedding ? new EmbeddingClient(knowledgeConfig.embedding) : undefined,
 		new KnowledgeVectorRepository(knowledgeConfig.qdrant),
 	);
-	const customTools = createCustomTools(dataService, analysisService, knowledgeService);
+	const customTools = createCustomTools(dataService, analysisService, knowledgeService, faultEventService);
 
 	const { session } = await createAgentSession({
 		cwd,
