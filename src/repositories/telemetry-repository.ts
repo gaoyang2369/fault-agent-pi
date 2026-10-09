@@ -1,11 +1,11 @@
-import type { Pool, RowDataPacket } from "mysql2/promise";
+import type { Pool, PoolConnection, RowDataPacket } from "mysql2/promise";
+import { deviceRegistry } from "../domain/device/registry.ts";
 
 /**
  * 遥测数据仓储：本仓库中唯一出现 SQL 的地方。
  *
- * 三条查询形状都是**窗口无关**的——返回行数只取决于请求了多少个指标，与时间窗口内
- * 有多少行无关。这是"不把几十万行塞进 LLM 上下文"的结构性保证：聚合在数据库里做，
- * 原始行根本不进入 Node 进程（除非显式要求少量采样）。
+ * 聚合与状态分组的返回规模不随窗口行数增长；原始采样有数量上限。
+ * 故障事件读取另走分批迭代，只供服务在进程内消费，不作为工具返回值发送给 LLM。
  */
 
 /** 单个数值指标的统计摘要。 */
@@ -34,6 +34,85 @@ export interface StateGroup {
 export interface RawSampleRow {
 	readonly timestamp: string;
 	readonly values: Readonly<Record<string, number | string | null>>;
+}
+
+/** 原始编码记录；这里只读数据，清除值、消息类别和连续事件由服务解释。 */
+export interface RawFaultRecord {
+	/** 数据库 id 是 BIGINT，以十进制字符串返回，避免 JavaScript number 丢失精度。 */
+	readonly id: string;
+	readonly timestamp: string;
+	readonly faultCode: string | null;
+	readonly alarmCode: string | null;
+}
+
+/** 闭区间查询；table 必须来自设备注册表，不能是任意合法 SQL 标识符。 */
+export interface FaultRecordQuery extends TimeWindow {
+	readonly table: string;
+}
+
+export interface FaultRecordReadOptions {
+	/** 默认 1000，范围 1–5000；控制单批内存与数据库返回规模。 */
+	readonly batchSize?: number;
+	/** 单次数据库操作（含等待连接）的硬截止时间，默认 10 秒，上限 60 秒。 */
+	readonly queryTimeoutMs?: number;
+	/** 整次读取预算，包含消费方处理时间，默认 120 秒，上限 600 秒。 */
+	readonly scanTimeoutMs?: number;
+	readonly signal?: AbortSignal;
+}
+
+/** 用接口注入后续事件服务，服务测试不必创建数据库连接。 */
+export interface FaultRecordReader {
+	iterateFaultRecords(request: FaultRecordQuery, options?: FaultRecordReadOptions): AsyncIterable<RawFaultRecord>;
+}
+
+const FAULT_TABLES = new Set(deviceRegistry.list().map((device) => device.table));
+const TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+function isTimestamp(value: string): boolean {
+	if (!TIMESTAMP_PATTERN.test(value)) return false;
+	const date = new Date(`${value.replace(" ", "T")}Z`);
+	return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 19).replace("T", " ") === value;
+}
+
+function boundedOption(value: number, maximum: number, label: string): number {
+	if (!Number.isInteger(value) || value < 1 || value > maximum) {
+		throw new Error(`${label} 必须是 1–${maximum} 的整数。`);
+	}
+	return value;
+}
+
+/**
+ * 超时 / 取消先拒绝调用方，再关闭本次专用连接。只做 Promise.race 会留下后台 SQL。
+ * 同时观察迟到的完成 / 失败，避免底层请求稍后拒绝产生 unhandled rejection。
+ */
+async function faultReadOperation<T>(
+	operation: () => Promise<T>,
+	timeoutMs: number,
+	signal: AbortSignal,
+	interrupt: () => void,
+): Promise<T> {
+	signal.throwIfAborted();
+	return new Promise<T>((resolve, reject) => {
+		const cleanup = () => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", onAbort);
+		};
+		const stop = (reason: unknown) => {
+			cleanup();
+			reject(reason);
+			interrupt();
+		};
+		const onAbort = () => stop(signal.reason);
+		const timer = setTimeout(() => stop(new DOMException("故障记录读取的单次数据库操作超时。", "TimeoutError")), timeoutMs);
+		signal.addEventListener("abort", onAbort, { once: true });
+		Promise.resolve().then(() => {
+			signal.throwIfAborted();
+			return operation();
+		}).then(
+			(value) => { cleanup(); resolve(value); },
+			(error: unknown) => { cleanup(); reject(error); },
+		);
+	});
 }
 
 /** 一次聚合查询的附带信息：命中总量与窗口内首末时间。 */
@@ -106,7 +185,7 @@ function describeError(error: unknown): Error {
 	}
 }
 
-export class TelemetryRepository {
+export class TelemetryRepository implements FaultRecordReader {
 	/**
 	 * 接收的是连接池的**提供函数**而不是连接池实例：池要等到第一次真正查询时才创建，
 	 * 这样数据库没配好时 agent 仍能启动，报错只发生在调用工具的那一刻。
@@ -120,6 +199,117 @@ export class TelemetryRepository {
 			return result;
 		} catch (error) {
 			throw describeError(error);
+		}
+	}
+
+	/**
+	 * MySQL 5.7：在 InnoDB 只读一致性快照内，按 (timestamp, id) 游标逐批读取。
+	 * 不用 OFFSET，不丢弃正常值 '0'，也不合并 / 修正多码或未知字符串。
+	 *
+	 * 一次只持有一批记录；消费完当前批次才查下一批。整个迭代独占一个池连接，
+	 * 正常结束 / for-await break 后回滚并释放，取消 / 超时 / 失败时销毁连接。
+	 * 消费方必须用 for-await 或显式 return() 收尾；总预算也会关闭被遗弃的快照。
+	 */
+	async *iterateFaultRecords(
+		request: FaultRecordQuery,
+		options: FaultRecordReadOptions = {},
+	): AsyncGenerator<RawFaultRecord, void, unknown> {
+		const { table, startTime, endTime } = request;
+		if (!FAULT_TABLES.has(table)) throw new Error("故障记录查询的设备表未登记，必须使用设备注册表中的表名。");
+		const quotedTable = quoteIdentifier(table);
+		if (!isTimestamp(startTime) || !isTimestamp(endTime) || startTime >= endTime) {
+			throw new Error("故障记录查询时间必须是有效的 YYYY-MM-DD HH:MM:SS，且结束时间晚于起始时间。");
+		}
+		const batchSize = boundedOption(options.batchSize ?? 1000, 5000, "batchSize");
+		const queryTimeoutMs = boundedOption(options.queryTimeoutMs ?? 10_000, 60_000, "queryTimeoutMs");
+		const scanTimeoutMs = boundedOption(options.scanTimeoutMs ?? 120_000, 600_000, "scanTimeoutMs");
+		options.signal?.throwIfAborted();
+
+		const budget = new AbortController();
+		const signal = options.signal ? AbortSignal.any([options.signal, budget.signal]) : budget.signal;
+		const scanTimer = setTimeout(() => budget.abort(new DOMException("故障记录读取超过整次扫描时间预算。", "TimeoutError")), scanTimeoutMs);
+		let connection: PoolConnection | undefined;
+		let destroyed = false;
+		let transactionStarted = false;
+		const destroy = () => {
+			clearTimeout(scanTimer);
+			if (!destroyed) {
+				destroyed = true;
+				connection?.destroy();
+			}
+		};
+		// 即使生成器暂停在 yield，也及时关闭已取消 / 超时的快照。
+		signal.addEventListener("abort", destroy, { once: true });
+		const query = async (sql: string, params: readonly unknown[] = []): Promise<RowDataPacket[]> => {
+			const [records] = await faultReadOperation(
+				() => connection!.query<RowDataPacket[]>(sql, [...params]), queryTimeoutMs, signal, destroy,
+			);
+			return records;
+		};
+		try {
+			await faultReadOperation(async () => {
+				const acquired = await this.poolProvider().getConnection();
+				// 连接池等待无法撤销；取消 / 超时后迟到的连接须立即归还，不能泄漏。
+				if (destroyed) acquired.release();
+				else connection = acquired;
+			}, queryTimeoutMs, signal, destroy);
+			const [metadata] = await query(
+				"SELECT ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?", [table],
+			);
+			if (metadata?.engine !== "InnoDB") throw new Error("故障记录一致性读取要求已登记设备表使用 InnoDB 存储引擎。");
+			// 只影响下一次事务，不修改池连接的会话默认隔离级别。
+			await query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+			await query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
+			transactionStarted = true;
+
+			let cursor: RawFaultRecord | undefined;
+			while (true) {
+				const continuation = cursor ? "AND (`timestamp` > ? OR (`timestamp` = ? AND `id` > ?))" : "";
+				const params = cursor ? [startTime, endTime, cursor.timestamp, cursor.timestamp, cursor.id] : [startTime, endTime];
+				const batch = await query(
+					`SELECT /*+ MAX_EXECUTION_TIME(${queryTimeoutMs}) */ CAST(\`id\` AS CHAR) AS \`record_id\`,
+						\`timestamp\`, \`fault_code\`, \`alarm_code\` FROM ${quotedTable}
+						WHERE \`timestamp\` >= ? AND \`timestamp\` <= ? ${continuation}
+						ORDER BY \`timestamp\` ASC, \`id\` ASC LIMIT ${batchSize}`, params,
+				);
+				for (const row of batch) {
+					signal.throwIfAborted();
+					const id = toTextOrNull(row.record_id) ?? "";
+					const timestamp = toTextOrNull(row.timestamp) ?? "";
+					if (!/^[1-9]\d*$/.test(id) || !isTimestamp(timestamp) || timestamp < startTime || timestamp > endTime) {
+						throw new Error("故障记录含无效主键或时间戳，无法可靠推进读取游标。");
+					}
+					if (cursor && (timestamp < cursor.timestamp || (timestamp === cursor.timestamp && BigInt(id) <= BigInt(cursor.id)))) {
+						throw new Error("故障记录未按 timestamp、id 严格递增，已停止读取以免遗漏或重复。");
+					}
+					cursor = { id, timestamp, faultCode: toTextOrNull(row.fault_code), alarmCode: toTextOrNull(row.alarm_code) };
+					yield cursor;
+				}
+				signal.throwIfAborted();
+				if (batch.length < batchSize) break;
+			}
+		} catch (error) {
+			destroy();
+			if (signal.aborted) throw signal.reason;
+			if (error instanceof DOMException && error.name === "TimeoutError") throw error;
+			throw describeError(error);
+		} finally {
+			try {
+				if (connection && !destroyed) {
+					try {
+						if (transactionStarted) await query("ROLLBACK");
+					} catch (error) {
+						destroy();
+						if (signal.aborted) throw signal.reason;
+						if (error instanceof DOMException && error.name === "TimeoutError") throw error;
+						throw describeError(error);
+					}
+					if (!destroyed) connection.release();
+				}
+			} finally {
+				clearTimeout(scanTimer);
+				signal.removeEventListener("abort", destroy);
+			}
 		}
 	}
 
@@ -179,8 +369,8 @@ export class TelemetryRepository {
 	/**
 	 * 状态量按取值分组。
 	 *
-	 * 比"采样看几个点"有用得多：状态列的取值极少（实测 status ∈ {"0","42"}），分组结果
-	 * 直接给出"何时变成什么值"，也就是故障起始时刻，且行数有界。
+	 * 状态列的取值极少，分组结果给出每种值的出现次数和首末观测，且行数有界。
+	 * 同码多次出现会被合并；这些首末时间不能作为连续故障事件的发生 / 恢复时刻。
 	 */
 	async groupState(
 		table: string,
